@@ -1,42 +1,61 @@
-import { Controller, Get, Post, Body, Param, Put, Delete, UseGuards } from '@nestjs/common';
-import { MovieService } from './movie.service';
+import { Injectable, NotFoundException, Inject, CACHE_MANAGER } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
 import { Movie } from './movie.entity';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { MovieRepository } from './movie.repository';
+import { Cache } from 'cache-manager';
 
-@Controller('movies')
-export class MovieController {
-  constructor(private readonly movieService: MovieService) {}
+@Injectable()
+export class MovieService {
+  constructor(
+    @InjectRepository(Movie)
+    private readonly movieRepository: MovieRepository,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+  ) {}
 
-  @Get()
+  async createMovie(title: string, description: string): Promise<Movie> {
+    const movie = this.movieRepository.create({ title, description });
+    const savedMovie = await this.movieRepository.save(movie);
+    await this.cacheManager.del('movies');
+    return savedMovie;
+  }
+
   async getAllMovies(): Promise<Movie[]> {
-    return this.movieService.getAllMovies();
+    const cachedMovies = await this.cacheManager.get<Movie[]>('movies');
+    if (cachedMovies) {
+      return cachedMovies;
+    }
+
+    const movies = await this.movieRepository.find();
+    await this.cacheManager.set('movies', movies, { ttl: 600 });
+    return movies;
   }
 
-  @Get(':id')
-  async getMovieById(@Param('id') id: string): Promise<Movie> {
-    return this.movieService.getMovieById(+id);
+  async getMovieById(id: number): Promise<Movie> {
+    const movie = await this.movieRepository.findOne(id);
+    if (!movie) {
+      throw new NotFoundException('Movie not found');
+    }
+    return movie;
   }
 
-  @Post()
-  @UseGuards(JwtAuthGuard)
-  async createMovie(@Body() body: any): Promise<Movie> {
-    const { title, description } = body;
-    return this.movieService.createMovie(title, description);
-  }
-
-  @Put(':id')
-  @UseGuards(JwtAuthGuard)
   async updateMovie(
-    @Param('id') id: string,
-    @Body('title') title: string,
-    @Body('description') description: string,
+    id: number,
+    title: string,
+    description: string,
   ): Promise<Movie> {
-    return this.movieService.updateMovie(+id, title, description);
+    const movie = await this.getMovieById(id);
+    movie.title = title;
+    movie.description = description;
+    const updatedMovie = await this.movieRepository.save(movie);
+    await this.cacheManager.del('movies');
+    return updatedMovie;
   }
 
-  @Delete(':id')
-  @UseGuards(JwtAuthGuard)
-  async deleteMovie(@Param('id') id: string): Promise<void> {
-    return this.movieService.deleteMovie(+id);
+  async deleteMovie(id: number): Promise<void> {
+    const result = await this.movieRepository.delete(id);
+    if (result.affected === 0) {
+      throw new NotFoundException('Movie not found');
+    }
+    await this.cacheManager.del('movies');
   }
 }
